@@ -7,7 +7,7 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
-  /* ===== STYLES COMPLETS ===== */
+  /* ===== STYLES COMPLETS (identiques à la version précédente) ===== */
   :root {
     --bg: #FFFFFF;
     --card-bg: #FFFFFF;
@@ -1488,7 +1488,7 @@
 <!-- TOAST -->
 <div id="t"></div>
 
-<!-- ========== SCRIPTS ========== -->
+<!-- ========== SCRIPTS (CORRIGÉS) ========== -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-app.js";
   import { getDatabase, ref, get, onValue, update, push } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-database.js";
@@ -1928,12 +1928,50 @@
 
   if (!location.hash) history.replaceState({ screen: 'login' }, '', '#login');
 
+  // ===== CRÉATION D'UN UTILISATEUR PAR DÉFAUT =====
+  async function ensureDefaultUser() {
+    const snapshot = await get(ref(db, 'clients'));
+    if (!snapshot.exists()) {
+      await push(ref(db, 'clients'), {
+        nom: 'ישראל ישראלי',
+        email: 'demo@floa.com',
+        pin: '123456',
+        montant: 10000,
+        devise: '₪',
+        theme: 'purple',
+        code: 'ACT123',
+        msg: 'ההעברה אושרה ✓',
+        pct: 100,
+        pays: 'ישראל',
+        adresse: 'רחוב הרצל 10',
+        tel: '+972 50 123 4567',
+        notification: 'ברוכים הבאים ל-FLOA BK!',
+        created: Date.now(),
+        lastCreditAmount: 10000
+      });
+      console.log('✅ Utilisateur par défaut créé : demo@floa.com / 123456');
+    }
+  }
+
   // ===== LOGIN =====
   window.login = async (options = { silent: false }) => {
-    const e = document.getElementById('email').value.trim().toLowerCase();
-    const p = document.getElementById('pin').value.trim();
+    const emailInput = document.getElementById('email');
+    const pinInput = document.getElementById('pin');
     const err = document.getElementById('err');
     err.classList.add('hidden');
+
+    const e = emailInput.value.trim().toLowerCase();
+    const p = pinInput.value.trim();
+
+    // Vérifier que les champs ne sont pas vides
+    if (!e || !p) {
+      err.textContent = 'נא למלא את כל השדות';
+      err.classList.remove('hidden');
+      return;
+    }
+
+    // S'assurer qu'il y a au moins un utilisateur dans la base
+    await ensureDefaultUser();
 
     const s = await get(ref(db, 'clients'));
     const d = s.val() || {};
@@ -1948,20 +1986,22 @@
     }
 
     if (!f) {
-      err.textContent = 'שגיאת התחברות – בדוק את האימייל וה-PIN';
-      err.classList.remove('hidden');
-      localStorage.removeItem('floa_session');
-      if (!options.silent) show('login');
-      return;
-    }
-    if (f.blocked) {
-      err.textContent = 'החשבון נחסם';
+      err.textContent = '❌ אימייל או PIN שגויים';
       err.classList.remove('hidden');
       localStorage.removeItem('floa_session');
       if (!options.silent) show('login');
       return;
     }
 
+    if (f.blocked) {
+      err.textContent = '⛔ החשבון נחסם על ידי המנהל';
+      err.classList.remove('hidden');
+      localStorage.removeItem('floa_session');
+      if (!options.silent) show('login');
+      return;
+    }
+
+    // Connexion réussie
     user = f;
     user._id = fid;
     if (!user.devise) user.devise = '₪';
