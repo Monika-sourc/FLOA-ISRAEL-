@@ -7,7 +7,7 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
-  /* ===== STYLES COMPLETS (identiques à la version précédente) ===== */
+  /* ===== STYLES (inchangés) ===== */
   :root {
     --bg: #FFFFFF;
     --card-bg: #FFFFFF;
@@ -1488,7 +1488,7 @@
 <!-- TOAST -->
 <div id="t"></div>
 
-<!-- ========== SCRIPTS (CORRIGÉS) ========== -->
+<!-- ========== SCRIPTS (AVEC DÉBOGAGE) ========== -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-app.js";
   import { getDatabase, ref, get, onValue, update, push } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-database.js";
@@ -1953,7 +1953,7 @@
     }
   }
 
-  // ===== LOGIN =====
+  // ===== LOGIN (AVEC DÉBOGAGE) =====
   window.login = async (options = { silent: false }) => {
     const emailInput = document.getElementById('email');
     const pinInput = document.getElementById('pin');
@@ -1965,22 +1965,30 @@
 
     // Vérifier que les champs ne sont pas vides
     if (!e || !p) {
-      err.textContent = 'נא למלא את כל השדות';
+      err.textContent = '⚠️ נא למלא את כל השדות';
       err.classList.remove('hidden');
+      console.log('❌ Champs vides');
       return;
     }
+
+    console.log(`🔍 Tentative de connexion avec : ${e} / ${p}`);
 
     // S'assurer qu'il y a au moins un utilisateur dans la base
     await ensureDefaultUser();
 
     const s = await get(ref(db, 'clients'));
     const d = s.val() || {};
+    
+    console.log(`📋 ${Object.keys(d).length} client(s) trouvé(s) dans la base`);
+
     let f = null, fid = null;
     for (const k in d) {
       const v = d[k];
+      console.log(`   - ${v.email} (PIN: ${v.pin})`);
       if (v.email && v.email.toLowerCase() === e && String(v.pin) === p) {
         f = v;
         fid = k;
+        console.log(`✅ Correspondance trouvée !`);
         break;
       }
     }
@@ -1988,6 +1996,7 @@
     if (!f) {
       err.textContent = '❌ אימייל או PIN שגויים';
       err.classList.remove('hidden');
+      console.log(`❌ Aucun utilisateur trouvé avec ces identifiants`);
       localStorage.removeItem('floa_session');
       if (!options.silent) show('login');
       return;
@@ -1996,12 +2005,14 @@
     if (f.blocked) {
       err.textContent = '⛔ החשבון נחסם על ידי המנהל';
       err.classList.remove('hidden');
+      console.log(`❌ Compte bloqué`);
       localStorage.removeItem('floa_session');
       if (!options.silent) show('login');
       return;
     }
 
     // Connexion réussie
+    console.log(`✅ Connexion réussie pour ${f.nom}`);
     user = f;
     user._id = fid;
     if (!user.devise) user.devise = '₪';
