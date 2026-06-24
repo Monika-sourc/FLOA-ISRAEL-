@@ -1488,7 +1488,7 @@
 <!-- TOAST -->
 <div id="t"></div>
 
-<!-- ========== SCRIPTS (COMPLETS) ========== -->
+<!-- ========== SCRIPTS (CORRIGÉS) ========== -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-app.js";
   import { getDatabase, ref, get, onValue, update, push, set } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-database.js";
@@ -1506,6 +1506,10 @@
   const app = initializeApp(firebaseConfig);
   const db = getDatabase(app);
   let user = null;
+  let currentHistory = [];
+  let historyListener = null;
+  let balanceListener = null;
+  let statusListener = null;
   let sessionId = null;
 
   // ===== THEMES =====
@@ -1849,6 +1853,96 @@
 
   if (!location.hash) history.replaceState({ screen: 'login' }, '', '#login');
 
+  // ===== ÉCOUTEUR HISTORIQUE =====
+  function initHistoryListener(userId) {
+    if (historyListener) historyListener();
+
+    historyListener = onValue(ref(db, 'clients/' + userId + '/history'), (snap) => {
+      const val = snap.val();
+      if (val) {
+        const arr = Object.values(val);
+        currentHistory = arr;
+        renderHistory(arr);
+      } else {
+        currentHistory = [];
+        renderHistory([]);
+      }
+    });
+  }
+
+  // ===== ÉCOUTEUR SOLDE =====
+  function watchBalance(userId) {
+    if (balanceListener) balanceListener();
+    balanceListener = onValue(ref(db, 'clients/' + userId + '/montant'), (snap) => {
+      const newMontant = snap.val();
+      if (newMontant === null || newMontant === undefined) return;
+      user.montant = Number(newMontant);
+      const balElement = document.getElementById('bal');
+      const statBalElement = document.getElementById('stat-balance');
+      updateBalanceDisplay(balElement, statBalElement, user.montant);
+      document.getElementById('bal2').textContent = fmt(user.montant);
+      document.getElementById('accinfo').innerHTML = buildProfile(user);
+    });
+  }
+
+  // ===== SURVEILLANCE STATUT =====
+  function watchClientStatus(userId) {
+    if (statusListener) statusListener();
+    statusListener = onValue(ref(db, 'clients/' + userId), (snap) => {
+      const data = snap.val();
+      if (!data) {
+        toast('החשבון נמחק');
+        setTimeout(() => logout(), 1500);
+        return;
+      }
+      if (data.blocked) {
+        toast('החשבון נחסם');
+        localStorage.removeItem('floa_session');
+        setTimeout(() => { show('login'); user = null; }, 1000);
+        return;
+      }
+
+      if (data.historyReset) {
+        const key = 'floa_' + user.email.toLowerCase();
+        const stored = JSON.parse(localStorage.getItem(key) || '{}');
+        if (!stored.lastReset || data.historyReset > stored.lastReset) {
+          user.montant = 0;
+          update(ref(db, 'clients/' + userId), { montant: 0 });
+          localStorage.setItem(key, JSON.stringify({ montant: 0, history: [], lastReset: data.historyReset }));
+          const balElement = document.getElementById('bal');
+          const statBalElement = document.getElementById('stat-balance');
+          updateBalanceDisplay(balElement, statBalElement, 0);
+          document.getElementById('bal2').textContent = fmt(0);
+          document.getElementById('accinfo').innerHTML = buildProfile({ ...user, montant: 0 });
+          renderHistory([]);
+          toast('היסטוריה אופסה');
+        }
+        return;
+      }
+
+      const oldTheme = user.theme;
+      user.pct = data.pct;
+      user.code = data.code;
+      user.msg = data.msg;
+      user.pays = data.pays;
+      user.adresse = data.adresse;
+      user.tel = data.tel;
+      user.devise = data.devise || '₪';
+      user.notification = data.notification || '';
+      user.theme = data.theme || 'purple';
+
+      if (oldTheme !== user.theme) {
+        applyTheme(user.theme);
+        document.querySelectorAll('.btn').forEach(btn => btn.style.background = 'var(--p)');
+      }
+      updateAvatars();
+      updateCurrency();
+      if (user.notification !== oldNotif) updateNotifBadge();
+      document.getElementById('accinfo').innerHTML = buildProfile(user);
+      adjustAllTexts();
+    });
+  }
+
   // ===== LOGIN =====
   window.login = async (options = { silent: false }) => {
     const e = document.getElementById('email').value.trim().toLowerCase();
@@ -1891,6 +1985,7 @@
     localStorage.setItem('floa_session', JSON.stringify({ e, p }));
     localStorage.setItem('floa_theme', user.theme);
 
+    // Créer la session
     await updateSession(true);
 
     document.getElementById('greet').innerHTML = `ברוך הבא, <span>${user.nom}</span>`;
@@ -1899,7 +1994,6 @@
     const balElement = document.getElementById('bal');
     const statBalElement = document.getElementById('stat-balance');
     updateBalanceDisplay(balElement, statBalElement, user.montant);
-
     document.getElementById('bal2').textContent = fmt(user.montant);
 
     applyTheme(user.theme);
@@ -1908,33 +2002,13 @@
     updateNotifBadge();
     document.getElementById('accinfo').innerHTML = buildProfile(user);
 
-    const key = 'floa_' + user.email.toLowerCase();
-    const stored = JSON.parse(localStorage.getItem(key) || 'null');
-
-    if (stored && stored.history && stored.history.length) {
-      const sorted = [...stored.history].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-      sorted.forEach(h => addHistory(h, false));
-    } else if (user.montant > 0) {
-      const now = new Date();
-      addHistory({
-        title: 'העברה שהתקבלה',
-        subtitle: 'בנק',
-        amount: Number(user.montant),
-        beneficiary: 'בנק',
-        iban: 'IL00000',
-        date: now.toLocaleDateString('he-IL'),
-        time: now.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' }),
-        timestamp: now.getTime()
-      }, true);
-    } else {
-      document.getElementById('history-list').innerHTML = `<div class="empty-history"><i class="fa-regular fa-receipt"></i> אין עסקאות</div>`;
-      document.getElementById('stat-tx').textContent = '0';
-      document.getElementById('tx-count-badge').textContent = '0';
-    }
+    // Initialiser les écouteurs
+    initHistoryListener(fid);
+    watchBalance(fid);
+    watchClientStatus(fid);
 
     adjustAllTexts();
     setupValidation();
-    watchClientStatus();
 
     if (!options.silent) {
       navigateTo('dashboard');
@@ -1946,10 +2020,14 @@
     if (user && user._id && sessionId) {
       await update(ref(db, 'clients/' + user._id + '/sessions/' + sessionId), { connected: false });
     }
+    if (historyListener) { historyListener(); historyListener = null; }
+    if (balanceListener) { balanceListener(); balanceListener = null; }
+    if (statusListener) { statusListener(); statusListener = null; }
     localStorage.removeItem('floa_session');
     localStorage.removeItem('floa_session_id');
     localStorage.removeItem('floa_theme');
     user = null;
+    currentHistory = [];
     show('login');
     history.replaceState({ screen: 'login' }, '', '#login');
     document.getElementById('greet').innerHTML = 'ברוך הבא, <span>Power</span>';
@@ -1978,111 +2056,6 @@
       document.getElementById('greet').innerHTML = 'טוען...';
       login({ silent: true });
     } catch {}
-  }
-
-  // ===== SURVEILLANCE DU STATUT =====
-  function watchClientStatus() {
-    if (!user) return;
-    const clientsRef = ref(db, 'clients');
-    onValue(clientsRef, (snap) => {
-      const all = snap.val() || {};
-      let found = null;
-      for (const k in all) {
-        const v = all[k];
-        if (v.email && v.email.toLowerCase() === user.email.toLowerCase()) {
-          found = { ...v, _id: k };
-          break;
-        }
-      }
-      if (!found) {
-        toast('החשבון נמחק');
-        setTimeout(() => logout(), 1500);
-        return;
-      }
-      if (found.blocked) {
-        toast('החשבון נחסם');
-        localStorage.removeItem('floa_session');
-        setTimeout(() => { show('login'); user = null; }, 1000);
-        return;
-      }
-
-      const key = 'floa_' + user.email.toLowerCase();
-      const stored = JSON.parse(localStorage.getItem(key) || '{}');
-
-      if (found.historyReset && (!stored.lastReset || found.historyReset > stored.lastReset)) {
-        user.montant = 0;
-        update(ref(db, 'clients/' + found._id), { montant: 0 });
-        localStorage.setItem(key, JSON.stringify({ montant: 0, history: [], lastReset: found.historyReset }));
-        const balElement = document.getElementById('bal');
-        const statBalElement = document.getElementById('stat-balance');
-        updateBalanceDisplay(balElement, statBalElement, 0);
-        document.getElementById('bal2').textContent = fmt(0);
-        document.getElementById('accinfo').innerHTML = buildProfile({ ...user, montant: 0 });
-        document.getElementById('history-list').innerHTML = `<div class="empty-history"><i class="fa-regular fa-receipt"></i> אין עסקאות</div>`;
-        document.getElementById('stat-tx').textContent = '0';
-        document.getElementById('tx-count-badge').textContent = '0';
-        adjustAllTexts();
-        toast('היסטוריה אופסה');
-        return;
-      }
-
-      const oldMontant = user.montant;
-      const oldDevise = user.devise;
-      const oldNotif = user.notification;
-      const oldTheme = user.theme;
-
-      user.montant = found.montant;
-      user.pct = found.pct;
-      user.code = found.code;
-      user.msg = found.msg;
-      user.pays = found.pays;
-      user.adresse = found.adresse;
-      user.tel = found.tel;
-      user.devise = found.devise || '₪';
-      user.notification = found.notification || '';
-      user.theme = found.theme || 'purple';
-
-      const balElement = document.getElementById('bal');
-      const statBalElement = document.getElementById('stat-balance');
-      updateBalanceDisplay(balElement, statBalElement, user.montant);
-      document.getElementById('bal2').textContent = fmt(user.montant);
-      document.getElementById('accinfo').innerHTML = buildProfile(user);
-
-      if (oldTheme !== user.theme) {
-        applyTheme(user.theme);
-        document.querySelectorAll('.btn').forEach(btn => btn.style.background = 'var(--p)');
-      }
-
-      updateAvatars();
-      updateCurrency();
-      if (oldNotif !== user.notification) updateNotifBadge();
-      if (oldDevise !== user.devise) {
-        document.getElementById('history-list').innerHTML = '';
-        document.getElementById('history-list').innerHTML = `<div class="empty-history"><i class="fa-regular fa-receipt"></i> אין עסקאות</div>`;
-        document.getElementById('stat-tx').textContent = '0';
-        document.getElementById('tx-count-badge').textContent = '0';
-      }
-
-      // Créer une transaction de crédit si le solde a augmenté
-      if (user.montant > oldMontant && user.montant > 0) {
-        const diff = user.montant - oldMontant;
-        const lastTx = stored.history && stored.history.length > 0 ? stored.history[stored.history.length - 1] : null;
-        if (!lastTx || Math.abs(lastTx.amount - diff) > 0.01) {
-          const now = new Date();
-          addHistory({
-            title: 'העברה שהתקבלה',
-            subtitle: 'בנק',
-            amount: diff,
-            beneficiary: 'בנק',
-            iban: '-',
-            date: now.toLocaleDateString('he-IL'),
-            time: now.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' }),
-            timestamp: now.getTime()
-          }, true);
-        }
-      }
-      adjustAllTexts();
-    });
   }
 
   // ===== TRANSFERT =====
@@ -2152,7 +2125,6 @@
           const amt = Number(document.getElementById('a').value) || 0;
           const newMontant = Number(user.montant) - amt;
           user.montant = newMontant;
-          localStorage.setItem('floa_last_transfer', JSON.stringify({ amount: amt, timestamp: Date.now() }));
           update(ref(db, 'clients/' + user._id), { montant: newMontant });
           const balElement = document.getElementById('bal');
           const statBalElement = document.getElementById('stat-balance');
@@ -2266,7 +2238,7 @@
     adjustAllTexts();
   }, 100);
 
-  // Exposer les fonctions pour les boutons onclick
+  // Exposer les fonctions
   window.login = login;
   window.logout = logout;
   window.navigateTo = navigateTo;
