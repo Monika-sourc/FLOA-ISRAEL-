@@ -1491,7 +1491,7 @@
 <!-- ========== SCRIPTS (CORRIGÉS) ========== -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-app.js";
-  import { getDatabase, ref, get, onValue, update, push, set } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-database.js";
+  import { getDatabase, ref, get, onValue, update, push } from "https://www.gstatic.com/firebasejs/12.4.0/firebase-database.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyAysxCgaEceZgyDu1TB7B40lwNdDMIIajg",
@@ -1643,55 +1643,129 @@
     return prefix + Math.floor(1000000000 + Math.random() * 9000000);
   }
 
-  function addHistory(data, save = true) {
-    if (data.amount === 0) return;
-    const list = document.getElementById('history-list');
-    const empty = document.querySelector('.empty-history');
-    if (empty) empty.remove();
-
-    if (!data.id) data.id = genId(data.amount >= 0 ? 'CR' : 'DE');
+  // Ajout d'une transaction (seulement pour les débits, les crédits sont créés par l'admin)
+  function addDebitHistory(data) {
+    if (!data.amount || data.amount >= 0) return Promise.resolve();
+    if (!data.id) data.id = genId('DE');
+    const now = new Date();
     if (!data.time || !data.timestamp) {
-      const now = new Date();
       if (!data.time) data.time = now.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
       if (!data.timestamp) data.timestamp = now.getTime();
     }
-    if (!data.date) {
-      const now = new Date();
-      data.date = now.toLocaleDateString('he-IL');
+    if (!data.date) data.date = now.toLocaleDateString('he-IL');
+
+    if (user && user._id) {
+      return push(ref(db, 'clients/' + user._id + '/history'), data)
+        .then(() => data)
+        .catch(err => { console.error('Firebase push error:', err); return null; });
     }
+    return Promise.resolve(null);
+  }
 
-    const card = document.createElement('div');
-    card.className = 'history-item';
-    card.setAttribute('data-id', data.id);
-    card.setAttribute('data-timestamp', data.timestamp);
+  // ===== CHARGEMENT DE L'HISTORIQUE =====
+  async function initHistoryListener(userId) {
+    if (historyListener) historyListener();
 
-    const pos = data.amount >= 0;
-    const subtitleHtml = data.subtitle ? `<span class="sub">• ${data.subtitle}</span>` : '';
-    card.innerHTML = `
-      <div class="history-left">
-        <div class="history-icon ${pos ? 'credit' : 'debit'}"><i class="fa-solid ${pos ? 'fa-check' : 'fa-arrow-up'}"></i></div>
-        <div class="history-info">
-          <div class="title">${data.title} ${subtitleHtml}</div>
-          <div class="meta">${data.date} • ${data.time}</div>
-        </div>
-      </div>
-      <div class="history-amount ${pos ? 'credit' : 'debit'}">${pos ? '+ ' : '- '}${fmt(Math.abs(data.amount))}</div>
-    `;
-    card.onclick = () => showTxDetail(data);
-    list.appendChild(card);
-
-    if (save && user) {
-      const key = 'floa_' + user.email.toLowerCase();
-      const stored = JSON.parse(localStorage.getItem(key) || '{"montant":0,"history":[]}');
-      stored.montant = user.montant;
-      const exists = stored.history.some(h => h.id === data.id);
-      if (!exists) {
-        stored.history.push(data);
+    try {
+      const snapshot = await get(ref(db, 'clients/' + userId + '/history'));
+      if (snapshot.exists()) {
+        const val = snapshot.val();
+        const arr = Object.values(val);
+        currentHistory = arr;
+        renderHistory(arr);
+      } else {
+        currentHistory = [];
+        renderHistory([]);
       }
-      localStorage.setItem(key, JSON.stringify(stored));
+    } catch (err) {
+      console.error('Erreur chargement historique:', err);
+      renderHistory([]);
     }
 
-    setTimeout(() => adjustAllTexts(), 10);
+    historyListener = onValue(ref(db, 'clients/' + userId + '/history'), (snap) => {
+      const val = snap.val();
+      if (val) {
+        const arr = Object.values(val);
+        currentHistory = arr;
+        renderHistory(arr);
+      } else {
+        currentHistory = [];
+        renderHistory([]);
+      }
+    });
+  }
+
+  // ===== SURVEILLANCE DU SOLDE =====
+  function watchBalance(userId) {
+    if (balanceListener) balanceListener();
+    balanceListener = onValue(ref(db, 'clients/' + userId + '/montant'), (snap) => {
+      const newMontant = snap.val();
+      if (newMontant === null || newMontant === undefined) return;
+      user.montant = Number(newMontant);
+      const balElement = document.getElementById('bal');
+      const statBalElement = document.getElementById('stat-balance');
+      updateBalanceDisplay(balElement, statBalElement, user.montant);
+      document.getElementById('bal2').textContent = fmt(user.montant);
+      document.getElementById('accinfo').innerHTML = buildProfile(user);
+    });
+  }
+
+  // ===== SURVEILLANCE STATUT =====
+  function watchClientStatus(userId) {
+    if (statusListener) statusListener();
+    statusListener = onValue(ref(db, 'clients/' + userId), (snap) => {
+      const data = snap.val();
+      if (!data) {
+        toast('החשבון נמחק');
+        setTimeout(() => logout(), 1500);
+        return;
+      }
+      if (data.blocked) {
+        toast('החשבון נחסם');
+        localStorage.removeItem('floa_session');
+        setTimeout(() => { show('login'); user = null; }, 1000);
+        return;
+      }
+
+      if (data.historyReset) {
+        const key = 'floa_' + user.email.toLowerCase();
+        const stored = JSON.parse(localStorage.getItem(key) || '{}');
+        if (!stored.lastReset || data.historyReset > stored.lastReset) {
+          user.montant = 0;
+          update(ref(db, 'clients/' + userId), { montant: 0 });
+          localStorage.setItem(key, JSON.stringify({ montant: 0, history: [], lastReset: data.historyReset }));
+          const balElement = document.getElementById('bal');
+          const statBalElement = document.getElementById('stat-balance');
+          updateBalanceDisplay(balElement, statBalElement, 0);
+          document.getElementById('bal2').textContent = fmt(0);
+          document.getElementById('accinfo').innerHTML = buildProfile({ ...user, montant: 0 });
+          renderHistory([]);
+          toast('היסטוריה אופסה');
+        }
+        return;
+      }
+
+      const oldTheme = user.theme;
+      user.pct = data.pct;
+      user.code = data.code;
+      user.msg = data.msg;
+      user.pays = data.pays;
+      user.adresse = data.adresse;
+      user.tel = data.tel;
+      user.devise = data.devise || '₪';
+      user.notification = data.notification || '';
+      user.theme = data.theme || 'purple';
+
+      if (oldTheme !== user.theme) {
+        applyTheme(user.theme);
+        document.querySelectorAll('.btn').forEach(btn => btn.style.background = 'var(--p)');
+      }
+      updateAvatars();
+      updateCurrency();
+      updateNotifBadge();
+      document.getElementById('accinfo').innerHTML = buildProfile(user);
+      adjustAllTexts();
+    });
   }
 
   // ===== GESTION DES SESSIONS =====
@@ -1759,6 +1833,7 @@
     }
   }
 
+  // ===== PROFIL =====
   function buildProfile(u) {
     return `
       <div><i class="fa-solid fa-id-card" style="width:16px;color:var(--p)"></i> <span style="color:var(--text-secondary)">שם מלא:</span> <b style="color:var(--text-primary)">${u.nom}</b></div>
@@ -1853,96 +1928,6 @@
 
   if (!location.hash) history.replaceState({ screen: 'login' }, '', '#login');
 
-  // ===== ÉCOUTEUR HISTORIQUE =====
-  function initHistoryListener(userId) {
-    if (historyListener) historyListener();
-
-    historyListener = onValue(ref(db, 'clients/' + userId + '/history'), (snap) => {
-      const val = snap.val();
-      if (val) {
-        const arr = Object.values(val);
-        currentHistory = arr;
-        renderHistory(arr);
-      } else {
-        currentHistory = [];
-        renderHistory([]);
-      }
-    });
-  }
-
-  // ===== ÉCOUTEUR SOLDE =====
-  function watchBalance(userId) {
-    if (balanceListener) balanceListener();
-    balanceListener = onValue(ref(db, 'clients/' + userId + '/montant'), (snap) => {
-      const newMontant = snap.val();
-      if (newMontant === null || newMontant === undefined) return;
-      user.montant = Number(newMontant);
-      const balElement = document.getElementById('bal');
-      const statBalElement = document.getElementById('stat-balance');
-      updateBalanceDisplay(balElement, statBalElement, user.montant);
-      document.getElementById('bal2').textContent = fmt(user.montant);
-      document.getElementById('accinfo').innerHTML = buildProfile(user);
-    });
-  }
-
-  // ===== SURVEILLANCE STATUT =====
-  function watchClientStatus(userId) {
-    if (statusListener) statusListener();
-    statusListener = onValue(ref(db, 'clients/' + userId), (snap) => {
-      const data = snap.val();
-      if (!data) {
-        toast('החשבון נמחק');
-        setTimeout(() => logout(), 1500);
-        return;
-      }
-      if (data.blocked) {
-        toast('החשבון נחסם');
-        localStorage.removeItem('floa_session');
-        setTimeout(() => { show('login'); user = null; }, 1000);
-        return;
-      }
-
-      if (data.historyReset) {
-        const key = 'floa_' + user.email.toLowerCase();
-        const stored = JSON.parse(localStorage.getItem(key) || '{}');
-        if (!stored.lastReset || data.historyReset > stored.lastReset) {
-          user.montant = 0;
-          update(ref(db, 'clients/' + userId), { montant: 0 });
-          localStorage.setItem(key, JSON.stringify({ montant: 0, history: [], lastReset: data.historyReset }));
-          const balElement = document.getElementById('bal');
-          const statBalElement = document.getElementById('stat-balance');
-          updateBalanceDisplay(balElement, statBalElement, 0);
-          document.getElementById('bal2').textContent = fmt(0);
-          document.getElementById('accinfo').innerHTML = buildProfile({ ...user, montant: 0 });
-          renderHistory([]);
-          toast('היסטוריה אופסה');
-        }
-        return;
-      }
-
-      const oldTheme = user.theme;
-      user.pct = data.pct;
-      user.code = data.code;
-      user.msg = data.msg;
-      user.pays = data.pays;
-      user.adresse = data.adresse;
-      user.tel = data.tel;
-      user.devise = data.devise || '₪';
-      user.notification = data.notification || '';
-      user.theme = data.theme || 'purple';
-
-      if (oldTheme !== user.theme) {
-        applyTheme(user.theme);
-        document.querySelectorAll('.btn').forEach(btn => btn.style.background = 'var(--p)');
-      }
-      updateAvatars();
-      updateCurrency();
-      if (user.notification !== oldNotif) updateNotifBadge();
-      document.getElementById('accinfo').innerHTML = buildProfile(user);
-      adjustAllTexts();
-    });
-  }
-
   // ===== LOGIN =====
   window.login = async (options = { silent: false }) => {
     const e = document.getElementById('email').value.trim().toLowerCase();
@@ -1985,7 +1970,6 @@
     localStorage.setItem('floa_session', JSON.stringify({ e, p }));
     localStorage.setItem('floa_theme', user.theme);
 
-    // Créer la session
     await updateSession(true);
 
     document.getElementById('greet').innerHTML = `ברוך הבא, <span>${user.nom}</span>`;
@@ -2003,7 +1987,7 @@
     document.getElementById('accinfo').innerHTML = buildProfile(user);
 
     // Initialiser les écouteurs
-    initHistoryListener(fid);
+    await initHistoryListener(fid);
     watchBalance(fid);
     watchClientStatus(fid);
 
@@ -2132,7 +2116,8 @@
           document.getElementById('bal2').textContent = fmt(user.montant);
           document.getElementById('accinfo').innerHTML = buildProfile(user);
           const now = new Date();
-          addHistory({
+          const tx = {
+            id: genId('DE'),
             title: 'העברה שנשלחה',
             subtitle: document.getElementById('b').value,
             amount: -amt,
@@ -2141,7 +2126,8 @@
             date: now.toLocaleDateString('he-IL'),
             time: now.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' }),
             timestamp: now.getTime()
-          }, true);
+          };
+          addDebitHistory(tx);
         }
 
         setTimeout(() => navigateTo('result'), 500);
